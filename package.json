@@ -1,0 +1,66 @@
+{
+  "name": "cortico-world-feishu",
+  "version": "0.1.5",
+  "type": "module",
+  "description": "让 Bot 通过飞书企业自建应用的长连接收发私聊和群聊：消息推给 Persona，用工具回话。同一个 Persona，不是分身。",
+  "author": "a1403372882gg",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lwlong0922/cortico-world-feishu.git"
+  },
+  "homepage": "https://github.com/lwlong0922/cortico-world-feishu#readme",
+  "bugs": {
+    "url": "https://github.com/lwlong0922/cortico-world-feishu/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./src/index.ts",
+  "keywords": [
+    "cortico-world",
+    "cortico",
+    "feishu",
+    "lark",
+    "im"
+  ],
+  "cortico": {
+    "kind": "world",
+    "api": 6,
+    "displayName": "飞书",
+    "icon": "icon.svg",
+    "describe": "describe.json",
+    "webUiClient": "webui.js",
+    "tags": [
+      "im",
+      "requires-key",
+      "external-setup"
+    ],
+    "locales": {
+      "zh": {
+        "displayName": "飞书",
+        "description": "用飞书企业自建应用的长连接收发私聊和群聊：消息推给 Persona，回复用 feishu_reply 发回飞书。"
+      },
+      "en": {
+        "displayName": "Feishu (Lark)",
+        "description": "Send and receive Feishu/Lark direct and group messages over a long connection: incoming messages go to the Persona, and feishu_reply sends replies back."
+      }
+    }
+  },
+  "files": [
+    "src",
+    "webui.js",
+    "describe.json",
+    "icon.svg",
+    "feishu-permissions.json",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.76.0"
+  },
+  "devDependencies": {
+    "cortico": "^0.2.7"
+  }
+}
