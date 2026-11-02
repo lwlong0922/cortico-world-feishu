@@ -22,7 +22,7 @@ export const FEISHU_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
   ),
   make(
     'feishu_reply',
-    'Send a reply on Feishu: plain text, an image (by log:/mem: blob handle), and/or an emoji reaction on a received message. Pass messageId to reply/react to a message already received, or chatId to send into a chat that has already sent a message here. At least one of text, image or reaction is required. Refuses unknown chats, non-owner direct messages when an owner is set, file paths in image, and texts that contain an open_id or chatId unless the chat is a known direct message.',
+    'Send a reply on Feishu: plain text, an image/meme, and/or an emoji reaction on a received message. Pass messageId to reply/react to a message already received, or chatId to send into a chat that has already sent a message here. At least one of text, image or reaction is required. Refuses unknown chats, non-owner direct messages when an owner is set, local file paths in image, and texts that contain an open_id or chatId unless the chat is a known direct message.',
     ['speak'],
     {
       text: {
@@ -33,7 +33,7 @@ export const FEISHU_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       },
       image: {
         type: 'string',
-        description: 'Optional image blob handle from the host (must start with "mem:" or "log:"; local file paths and URLs are refused).',
+        description: 'Optional image handle: pass a host blob handle ("mem:..." or "log:...") or a DeepSeek-chan (蓝色大肥鱼) meme handle ("meme:<id or keyword>", e.g. "meme:123" for 蹭饭, "meme:097" for 得加钱, "meme:010" for 原来是高等模型, "meme:085" for 摆烂, or "meme:摸鱼"). Local file paths and arbitrary URLs are refused.',
       },
       reaction: {
         type: 'string',

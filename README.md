@@ -7,13 +7,13 @@ Cortico World。宿主:Coopanion(World API 6)。依赖 `@larksuiteoapi/node-sdk`
 ## 它做什么
 
 - 起一条飞书长连接(`im.message.receive_v1` 收消息、`im.message.reaction.created_v1` 收表情回复),推进 `host.pushEvent({ type: 'feishu.message' })`。
-- 工具 `feishu_reply`:回复某条消息(`messageId`)或发到某个会话(`chatId`);支持发文字(`text`)、发宿主图片句柄(`image`,仅限 `mem:` / `log:`)以及给消息贴表情回复(`reaction`,如 `THUMBSUP` / `OK` / `DONE`)。
+- 工具 `feishu_reply`:回复某条消息(`messageId`)或发到某个会话(`chatId`);支持发文字(`text`)、发宿主图片句柄(`image`,支持 `mem:` / `log:` 句柄与 `meme:<编号或关键词>` 蓝色大肥鱼表情包)以及给消息贴表情回复(`reaction`,如 `THUMBSUP` / `OK` / `DONE`)。
 - 工具 `feishu_status`:连没连上、今天收发了多少、上次错在哪。
 - 工具 `feishu_roster`:拉一个群的成员名单(open_id + 名字 + 部门,权限够才有名字和部门)。
 - 工具 `feishu_setup`:存 App ID / App Secret(进宿主的秘密配置,不回显),重连。
 - 「凭证」面板:同一件事的界面版 —— 填 App ID / App Secret(Secret 用密码框,存进去就不再显示),保存后自动重连,连不上把飞书错误码显示在同一页。
 - 「会话」面板:收发流水、连接状态、今日计数。
-- 本地状态(`dataDir/feishu/`):`state.json`(每日收发计数,防刷屏)、`thread.json`(最近 300 条会话流水)、`chats.json`(见过的会话 chatId 与类型)、`names.json`(open_id 与显示名/部门缓存)。前两者和认人缓存都可以在扩展页「数据」页签一键清空。
+- 本地状态(`dataDir/feishu/`):`state.json`(每日收发计数,防刷屏)、`thread.json`(最近 300 条会话流水)、`chats.json`(见过的会话 chatId 与类型)、`names.json`(open_id 与显示名/部门缓存)、`memes.json`(大肥鱼表情包飞书 `image_key` 与图库索引缓存)。除 `chats.json` 外都可以在扩展页「数据」页签一键清空。
 
 ## 在飞书里建一个应用(一步步)
 
@@ -45,7 +45,7 @@ Cortico World。宿主:Coopanion(World API 6)。依赖 `@larksuiteoapi/node-sdk`
 
 - **断线期间的消息不补**:长连接只在进程活着时有效。重启、断网、机器睡眠期间,别人发的消息这个扩展不会知道,也没有补拉(`im:message:readonly` 的回读还没写),只有连上之后的消息能收到。
 - **只能发到见过的会话**:`feishu_reply` 只认进程里收到过消息的 chatId / messageId。想主动给某人私聊、或者新建群发通知,现在做不到。
-- **发送格式限制**:支持发纯文本、发图片(仅接受宿主的 `mem:` / `log:` 句柄,拒绝本机文件路径与外部网址)以及给消息贴表情回复(`reaction`);不能在正文里 @ 人,不能发富文本、卡片、按钮;链接也是干链接。
+- **发送格式限制**:支持发纯文本、发图片(仅接受宿主的 `mem:` / `log:` 句柄与固定白名单 CDN `aigengtu.com` 的 `meme:<编号或关键词>` 蓝色大肥鱼表情包,拒绝本机文件路径与任意外部网址)以及给消息贴表情回复(`reaction`);不能在正文里 @ 人,不能发富文本、卡片、按钮;链接也是干链接。
 - **凭证只能填、不能清**:面板没有「清除」。换应用就直接覆盖填一遍;想回到「未填」状态得手工改部署根目录的 `.env`。
 - **表情包(sticker)的图取不到**:飞书「获取消息资源文件」接口明确不支持表情包资源,只能拿到 `[表情]` 占位。普通图片、富文本里夹的图可以取。
 - **表情回复有个前提**:点赞事件(`im.message.reaction.created_v1`)本身不带 `chat_id`,扩展靠本地记过的 messageId→chatId 反查(进程内最多记 2000 条,重启时从 `thread.json` 恢复最近 300 条)。没见过或已滑出缓存的老消息被点赞就不推了;也没开「表情被取消」(`deleted_v1`)——只推加上去的。
@@ -78,6 +78,7 @@ Cortico World。宿主:Coopanion(World API 6)。依赖 `@larksuiteoapi/node-sdk`
 - `src/normalize.ts` — 消息体拍平(`messageText` / `stripMentions` / `imageKeys`)、表情映射与错误格式化纯函数。
 - `src/store.ts` — 本地状态持久化(`thread.json` / `chats.json` / `state.json`)、已知会话与出站安全校验。
 - `src/contacts.ts` — 认人缓存(`names.json`)、部门查询与 `feishu_roster` 群成员拉取。
+- `src/memes.ts` — 蓝色大肥鱼(DeepSeek娘 / `aigengtu.com`)表情包检索、白名单 CDN 下载、飞书上传与 `memes.json` 的 `image_key` 缓存。
 - `src/tools.ts` / `src/config.ts` — 工具声明、配置项。
 - `src/ENV_PROMPT.md` — 环境说明模板,带 `{{feishu.state}}` / `{{feishu.ownerName}}` / `{{feishu.extra}}` 三个变量;称呼和本机专属的规矩都从配置来,所以这份是通用的。
 - `webui.js` — 「会话」与「凭证」两个面板。

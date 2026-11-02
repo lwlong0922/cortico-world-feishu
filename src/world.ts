@@ -23,6 +23,7 @@ import {
   type FeishuConfigSection,
 } from './config.ts';
 import { FeishuContacts } from './contacts.ts';
+import { FeishuMemePack } from './memes.ts';
 import {
   REACTION_FACES,
   describeErr,
@@ -75,6 +76,7 @@ export class FeishuWorld implements World {
   private syncing = false;
   private readonly store: FeishuStore;
   private readonly contacts: FeishuContacts;
+  private readonly memes: FeishuMemePack;
 
   constructor(private ctx: WorldContext<FeishuConfigSection>) {
     this.enabledSeen = Boolean(this.ctx.cfg.enabled);
@@ -87,6 +89,11 @@ export class FeishuWorld implements World {
       (msg) => {
         this.lastError = msg;
       },
+    );
+    this.memes = new FeishuMemePack(
+      this.ctx.dataDir,
+      () => this.client,
+      () => this.ctx.secret(FEISHU_SECRET_APP_ID),
     );
   }
 
@@ -728,11 +735,15 @@ export class FeishuWorld implements World {
     }
     this.store.assertChat(chatId, trimmedText, this.ctx.cfg);
 
-    // 校验并读取宿主图片句柄(仅允许 mem: 与 log:,拒绝本机文件路径或 URL)
+    // 校验图片参数:支持宿主 mem:/log: 句柄,或 meme:<编号或关键词> 大肥鱼表情包(拒绝本机文件路径与任意外部 URL)
+    const isMemeHandle = /^meme:/i.test(imageHandle);
     let imageBytes: Buffer | undefined;
-    if (imageHandle) {
+    if (isMemeHandle && !imageHandle.replace(/^meme:/i, '').trim()) {
+      throw Error('meme: 后面要写编号(如 meme:123)或台词关键词(如 meme:得加钱)');
+    }
+    if (imageHandle && !isMemeHandle) {
       if (!/^(?:mem|log):/.test(imageHandle)) {
-        throw Error('image 只接受宿主的 mem: 或 log: 句柄,不接受文件路径或网址');
+        throw Error('image 只接受宿主的 mem: / log: 句柄或大肥鱼表情包 meme:<编号或关键词>,不接受文件路径或网址');
       }
       const blob = this.host?.blob(imageHandle);
       if (!blob || !blob.bytes?.byteLength) {
@@ -750,6 +761,7 @@ export class FeishuWorld implements World {
     const meta = this.store.chats.get(chatId);
     let reactionId = '';
     let imageMessageId = '';
+    let memeMatched: { id: string; title: string } | undefined;
     let textMessageId = '';
     const bumpRepliesIfSent = () => {
       if (reactionId || imageMessageId || textMessageId) {
@@ -781,20 +793,35 @@ export class FeishuWorld implements World {
       }
     }
 
-    // 2. 上传并发送图片
-    if (imageBytes) {
+    // 2. 上传并发送图片(或大肥鱼表情包)
+    if (imageBytes || isMemeHandle) {
       let imageKey = '';
-      try {
-        const up: any = await this.client.im.image.create({
-          data: { image_type: 'message', image: imageBytes },
-        });
-        imageKey = String(up?.image_key ?? up?.data?.image_key ?? '');
-        if (!imageKey) throw Error('飞书未返回 image_key');
-      } catch (e) {
-        const why = describeErr(e);
-        this.lastError = '上传图片失败:' + why;
-        bumpRepliesIfSent();
-        return { text: JSON.stringify({ status: 'failed', step: 'upload_image', error: why, note: '图片上传失败;请检查 im:resource 权限与图片大小(上限 10MB)' }), failed: true };
+      let recordLabel = `[图片] ${imageHandle}`;
+      if (isMemeHandle) {
+        try {
+          const resolved = await this.memes.resolveImageKey(imageHandle);
+          imageKey = resolved.imageKey;
+          memeMatched = { id: resolved.entry.id, title: resolved.entry.title };
+          recordLabel = `[大肥鱼表情 #${resolved.entry.id}] ${resolved.entry.title}`;
+        } catch (e) {
+          const why = describeErr(e);
+          this.lastError = '准备大肥鱼表情失败:' + why;
+          bumpRepliesIfSent();
+          return { text: JSON.stringify({ status: 'failed', step: 'resolve_meme', error: why }), failed: true };
+        }
+      } else if (imageBytes) {
+        try {
+          const up: any = await this.client.im.image.create({
+            data: { image_type: 'message', image: imageBytes },
+          });
+          imageKey = String(up?.image_key ?? up?.data?.image_key ?? '');
+          if (!imageKey) throw Error('飞书未返回 image_key');
+        } catch (e) {
+          const why = describeErr(e);
+          this.lastError = '上传图片失败:' + why;
+          bumpRepliesIfSent();
+          return { text: JSON.stringify({ status: 'failed', step: 'upload_image', error: why, note: '图片上传失败;请检查 im:resource 权限与图片大小(上限 10MB)' }), failed: true };
+        }
       }
 
       const imgContent = JSON.stringify({ image_key: imageKey });
@@ -812,6 +839,7 @@ export class FeishuWorld implements World {
           });
         }
       } catch (e) {
+        if (memeMatched) this.memes.evictImageKey(memeMatched.id);
         const why = describeErr(e);
         this.lastError = '发图失败:' + why;
         bumpRepliesIfSent();
@@ -819,12 +847,13 @@ export class FeishuWorld implements World {
       }
       const imgCode = imgRes?.code ?? imgRes?.data?.code ?? 0;
       if (imgCode !== 0) {
+        if (memeMatched) this.memes.evictImageKey(memeMatched.id);
         this.lastError = `发图失败 ${imgCode}:${imgRes?.msg ?? ''}`;
         bumpRepliesIfSent();
         return { text: JSON.stringify({ status: 'failed', step: 'send_image', code: imgCode, msg: imgRes?.msg ?? '' }), failed: true };
       }
       imageMessageId = String(imgRes?.data?.message_id ?? '');
-      this.store.record('out', `[图片] ${imageHandle}`, chatId, imageMessageId, '', meta?.chatType ?? '', meta?.openId ?? '');
+      this.store.record('out', recordLabel, chatId, imageMessageId, '', meta?.chatType ?? '', meta?.openId ?? '');
     }
 
     // 3. 发送文字
@@ -868,6 +897,7 @@ export class FeishuWorld implements World {
         status: 'sent',
         ...(outId ? { messageId: outId } : {}),
         ...(imageMessageId && textMessageId ? { imageMessageId } : {}),
+        ...(memeMatched ? { meme: memeMatched } : {}),
         ...(reactionId ? { reaction: reactionType, reactionId } : {}),
         today: this.store.stats.replies,
       }),
@@ -1034,6 +1064,15 @@ export class FeishuWorld implements World {
           note: 'open_id 换成名字和部门的缓存,清了下次会重新查通讯录。',
           stat: () => `${this.contacts.names.size} 人`,
           clear: () => this.contacts.clear(),
+        },
+        {
+          key: 'feishu-memes',
+          label: '大肥鱼表情缓存',
+          kind: 'disk',
+          location: this.memes.cacheFile(),
+          note: '已上传飞书的大肥鱼表情 image_key 与图库索引缓存,清了下次发送时重新拉取上传。',
+          stat: () => `已缓存 ${this.memes.cachedKeyCount()} 张`,
+          clear: () => this.memes.clear(),
         },
       ],
       // 配置页签:声明了才会在页面上露出 worlds.feishu.* 那几项(含群聊开关)。

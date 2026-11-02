@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- **接入「蓝色大肥鱼(DeepSeek娘)」表情包(`src/memes.ts`)**:
+  - `feishu_reply` 的 `image` 参数新增支持 `meme:<编号>`(如 `meme:123`、`meme:097`)或 `meme:<台词关键词>`(如 `meme:蹭饭`、`meme:得加钱`、`meme:摸鱼`),内置 23 张高频名场面速查表并支持按需从固定白名单(`aigengtu.com`)检索全量 2300+ 张梗图。
+  - 已上传飞书的 `image_key` 按应用 `appId` 隔离缓存在 `<dataDir>/feishu/memes.json`(面板「数据」页签可一键清空,发送报错失效时自动驱逐),后续同图秒发。
+  - `cortico.tags` 补入 `internet` 标签,重新生成 `describe.json`。
+
 ## 0.2.0
 
 - **群聊「只理会 @ 我或回复我的消息」开关**(`worlds.feishu.groupMentionOnly`,默认关闭):
@@ -8,11 +15,11 @@
   - 可传飞书 `emoji_type`(如 `THUMBSUP`、`OK`、`DONE`、`HEART`、`SMILE`、`THINKING` 等,也兼容直接传常用 emoji 符号)给指定 `messageId` 添加表情回复;可单独贴表情,也可与文字/图片同次调用发出。
   - `feishu-permissions.json` 补入 `im:message.reactions:write_only`。
 - **`feishu_reply` 支持发送图片(`image`)**:
-  - 接受宿主的 `mem:` 或 `log:` 图片句柄(严格拒绝本机文件路径与外部 URL),经 `im.image.create` 上传后发往目标会话或作为回复发出。
+  - 接受宿主的 `mem:` / `log:` 图片句柄(严格拒绝本机文件路径与任意外部 URL),经 `im.image.create` 上传后发出。
 - **WebUI 面板居中与卡片对齐**:
   - `webui.js` 的「会话」与「凭证」面板改用标准 `ui.sheet` 卡片并加 `1120px` 居中壳,消除顶部多余分隔线并与内置页签视觉对齐。
 - **代码模块化拆分**:
-  - 原 `src/world.ts` 拆分为 `src/normalize.ts`(纯函数消息拍平與表情映射)、`src/store.ts`(本地持久化与会话白名单校验)、`src/contacts.ts`(通讯录认人缓存与群成员名单)和 `src/world.ts`(连接与收发主干)四个模块。
+  - 原 `src/world.ts` 拆分为 `src/normalize.ts`(纯函数消息拍平与表情映射)、`src/store.ts`(本地持久化与会话白名单校验)、`src/contacts.ts`(通讯录认人缓存与群成员名单)和 `src/world.ts`(连接与收发主干)四个模块。
 
 ## 0.1.5
 
