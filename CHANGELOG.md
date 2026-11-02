@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.0
+
+- **群聊「只理会 @ 我或回复我的消息」开关**(`worlds.feishu.groupMentionOnly`,默认关闭):
+  - 打开后,群聊里只有 @ 机器人本人(通过 `/open-apis/bot/v3/info` 自动识别机器人 `open_id` / 应用名,排除 `@_all`)或直接回复/引用机器人所发消息(`parent_id` / `root_id`)的句子与表情回复才推进上下文;其他群友闲聊只记在「会话」面板流水里,不唤醒模型。
+- **`feishu_reply` 支持贴表情回复(`reaction`)**:
+  - 可传飞书 `emoji_type`(如 `THUMBSUP`、`OK`、`DONE`、`HEART`、`SMILE`、`THINKING` 等,也兼容直接传常用 emoji 符号)给指定 `messageId` 添加表情回复;可单独贴表情,也可与文字/图片同次调用发出。
+  - `feishu-permissions.json` 补入 `im:message.reactions:write_only`。
+- **`feishu_reply` 支持发送图片(`image`)**:
+  - 接受宿主的 `mem:` 或 `log:` 图片句柄(严格拒绝本机文件路径与外部 URL),经 `im.image.create` 上传后发往目标会话或作为回复发出。
+- **WebUI 面板居中与卡片对齐**:
+  - `webui.js` 的「会话」与「凭证」面板改用标准 `ui.sheet` 卡片并加 `1120px` 居中壳,消除顶部多余分隔线并与内置页签视觉对齐。
+- **代码模块化拆分**:
+  - 原 `src/world.ts` 拆分为 `src/normalize.ts`(纯函数消息拍平與表情映射)、`src/store.ts`(本地持久化与会话白名单校验)、`src/contacts.ts`(通讯录认人缓存与群成员名单)和 `src/world.ts`(连接与收发主干)四个模块。
+
 ## 0.1.5
 
 - `package.json` 补齐 GitHub `repository`、`homepage` 与 `bugs` 地址(`https://github.com/lwlong0922/cortico-world-feishu`)。

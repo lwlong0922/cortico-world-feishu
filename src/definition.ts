@@ -11,7 +11,7 @@ export const FEISHU: WorldDefinition<FeishuConfigSection> = {
   describe: {
     tools: describeTools(FEISHU_TOOL_DECLS, {
       feishu_status: '查看飞书长连接、今日收发和最近的错误。',
-      feishu_reply: '把话发回飞书（回复某条消息或发到某个会话）。',
+      feishu_reply: '把话或图片发回飞书，或给某条消息贴表情回复（支持回复某条消息或发到某个会话）。',
       feishu_roster: '拉一个群的成员名单（open_id + 名字）；部门要同租户的通讯录权限才拿得到。',
       feishu_setup: '保存飞书 App 凭证并重连；凭证不会回显。',
     }),

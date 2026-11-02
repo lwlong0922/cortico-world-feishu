@@ -22,17 +22,30 @@ export const FEISHU_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
   ),
   make(
     'feishu_reply',
-    'Send plain text back on Feishu. Pass messageId to reply to a message already received, or chatId to send into a chat that has already sent a message here. Refuses unknown chats, non-owner direct messages when an owner is set, and texts that contain an open_id or chatId unless the chat is a known direct message.',
+    'Send a reply on Feishu: plain text, an image (by log:/mem: blob handle), and/or an emoji reaction on a received message. Pass messageId to reply/react to a message already received, or chatId to send into a chat that has already sent a message here. At least one of text, image or reaction is required. Refuses unknown chats, non-owner direct messages when an owner is set, file paths in image, and texts that contain an open_id or chatId unless the chat is a known direct message.',
     ['speak'],
     {
-      text: { type: 'string', minLength: 1, maxLength: 3000, description: 'Message text, plain text.' },
+      text: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 3000,
+        description: 'Message text, plain text. Optional when image or reaction is provided.',
+      },
+      image: {
+        type: 'string',
+        description: 'Optional image blob handle from the host (must start with "mem:" or "log:"; local file paths and URLs are refused).',
+      },
+      reaction: {
+        type: 'string',
+        description: 'Optional Feishu emoji_type to add as a reaction on messageId (e.g. THUMBSUP, OK, DONE, HEART, SMILE, LAUGH, THINKING, CLAP, FIRE, PARTY, PRAY, MUSCLE). Requires messageId.',
+      },
       chatId: { type: 'string', description: 'Target chat id (from the message event meta).' },
       messageId: {
         type: 'string',
-        description: 'Reply to this message id instead of sending a new one; takes precedence over chatId.',
+        description: 'Reply or react to this message id instead of sending a new one; takes precedence over chatId.',
       },
     },
-    ['text'],
+    [],
   ),
   make(
     'feishu_roster',

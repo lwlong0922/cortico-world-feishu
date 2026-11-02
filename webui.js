@@ -1,27 +1,36 @@
 /**
- * 飞书 World 的浏览器端面板:一个「会话」页,把收到的和发出去的消息按时间列在一起。
+ * 飞书 World 的浏览器端面板:「会话」和「凭证」两个页签。
  *
  * 这里只写浏览器能直接跑的东西:不 import 框架模块、不碰 document.body、数据一律走 ctx.invoke。
  * 面板卸载时 host 会 abort、清 root,定时器用 ctx.interval 登记,自动停。
  */
 
 const NAME_OUT = '我';
+const SHELL_STYLE = 'width:100%;max-width:1120px;margin:0 auto;padding:0 0 24px;box-sizing:border-box;';
+
+function wrapSheet(ui, root, title, desc) {
+  const shell = ui.h('div');
+  shell.style.cssText = SHELL_STYLE;
+  const card = ui.sheet({ title, desc });
+  shell.append(card.el);
+  root.append(shell);
+  return card.body;
+}
 
 function mount(ctx) {
   const { ui, root } = ctx;
 
-  const section = ui.section('会话', '飞书上收发的每一句,按时间排;每 5 秒自己刷新一次。');
-  root.append(section);
+  const body = wrapSheet(ui, root, '会话', '飞书上收发的每一句,按时间排;每 5 秒自己刷新一次。');
 
   const bar = ui.rowbar();
-  section.append(bar);
+  body.append(bar);
   const pill = ui.pill('连接中');
   bar.append(pill);
   // 页面顶部那两个「今日收/今日回」徽标是扩展装载时算的,不会跟着变;这里现取现显。
   const counts = ui.pill('今日 —');
   bar.append(counts);
   const message = ui.msgline('飞书消息不在这里发,回复走 feishu_reply。');
-  section.append(message);
+  body.append(message);
 
   const log = ui.log({
     variant: 'conversation',
@@ -29,7 +38,7 @@ function mount(ctx) {
     maxHeight: 'calc(100vh - 320px)',
     empty: '还没有消息。',
   });
-  section.append(log.el);
+  body.append(log.el);
 
   let lastKey = '';
 
@@ -47,8 +56,8 @@ function mount(ctx) {
     for (const m of messages) {
       const who = m?.dir === 'out' ? NAME_OUT : String(m?.who ?? '').trim() || fallback;
       const t = ui.fmt.clock(m?.ts);
-      const body = String(m?.text ?? '').replace(/\s*\n\s*/g, ' ');
-      log.append(`${t}  ${who}: ${body}`, m?.dir === 'out' ? 'plain' : undefined);
+      const text = String(m?.text ?? '').replace(/\s*\n\s*/g, ' ');
+      log.append(`${t}  ${who}: ${text}`, m?.dir === 'out' ? 'plain' : undefined);
     }
     log.scrollToEnd();
   };
@@ -80,14 +89,15 @@ function mount(ctx) {
 function mountSetup(ctx) {
   const { ui, root } = ctx;
 
-  const section = ui.section(
+  const body = wrapSheet(
+    ui,
+    root,
     '飞书应用凭证',
     '在飞书开放平台「凭证与基础信息」里拿 App ID / App Secret。存在本机 .env,页面只显示 App ID,Secret 存进去就不再显示。',
   );
-  root.append(section);
 
   const status = ui.rowbar();
-  section.append(status);
+  body.append(status);
 
   const idInput = ui.input({ cls: 'mono grow', placeholder: 'cli_xxxxxxxxxxxxxxxx' });
   const secretInput = ui.input({ type: 'password', cls: 'mono grow', placeholder: '留空表示不改' });
@@ -99,7 +109,7 @@ function mountSetup(ctx) {
   idRow.append(idInput);
   const secretRow = ui.rowbar();
   secretRow.append(secretInput, save);
-  section.append(idRow, secretRow, msg);
+  body.append(idRow, secretRow, msg);
 
   const paint = (s) => {
     status.replaceChildren(

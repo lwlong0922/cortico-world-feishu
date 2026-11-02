@@ -6,6 +6,8 @@ export interface FeishuConfigSection {
   ownerOpenId: string;
   /** 群里说的也推给我。默认打开;只想听私聊就关掉。 */
   replyToGroup: boolean;
+  /** 群里只理会 @ 我或回复我的消息;关着时群里每句话都推进来。 */
+  groupMentionOnly: boolean;
   /** 每天最多回多少条，防止刷屏。0 表示不限。 */
   maxDailyReplies: number;
   /** 怎么称呼对方(会话面板、提示词里用)；留空就只说「对方」。 */
@@ -23,6 +25,7 @@ export const FEISHU_DEFAULTS: FeishuConfigSection = {
   enabled: false,
   ownerOpenId: '',
   replyToGroup: true,
+  groupMentionOnly: false,
   maxDailyReplies: 300,
   ownerName: '',
   extraPrompt: '',
@@ -51,6 +54,12 @@ export const FEISHU_CONFIG_GROUP: ConfigGroup = {
         type: 'boolean',
         title: '群里说话也推进来',
         description: '打开后群聊消息也推给我(别人说的也算)。只想听私聊就关掉。',
+        'x-hot': true,
+      },
+      'worlds.feishu.groupMentionOnly': {
+        type: 'boolean',
+        title: '群里只理会 @ 我或回复我的消息',
+        description: '打开后，群聊里只有 @ 机器人或直接回复机器人消息的句子才推进上下文；其他群友闲聊只记在「会话」面板里，不唤醒模型。',
         'x-hot': true,
       },
       'worlds.feishu.maxDailyReplies': {

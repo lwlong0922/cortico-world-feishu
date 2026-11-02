@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-feishu",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "type": "module",
   "description": "让 Bot 通过飞书企业自建应用的长连接收发私聊和群聊：消息推给 Persona，用工具回话。同一个 Persona，不是分身。",
   "author": "a1403372882gg",

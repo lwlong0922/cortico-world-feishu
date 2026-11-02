@@ -7,7 +7,7 @@ Cortico World。宿主:Coopanion(World API 6)。依赖 `@larksuiteoapi/node-sdk`
 ## 它做什么
 
 - 起一条飞书长连接(`im.message.receive_v1` 收消息、`im.message.reaction.created_v1` 收表情回复),推进 `host.pushEvent({ type: 'feishu.message' })`。
-- 工具 `feishu_reply`:回复某条消息(`messageId`)或发到某个会话(`chatId`)。
+- 工具 `feishu_reply`:回复某条消息(`messageId`)或发到某个会话(`chatId`);支持发文字(`text`)、发宿主图片句柄(`image`,仅限 `mem:` / `log:`)以及给消息贴表情回复(`reaction`,如 `THUMBSUP` / `OK` / `DONE`)。
 - 工具 `feishu_status`:连没连上、今天收发了多少、上次错在哪。
 - 工具 `feishu_roster`:拉一个群的成员名单(open_id + 名字 + 部门,权限够才有名字和部门)。
 - 工具 `feishu_setup`:存 App ID / App Secret(进宿主的秘密配置,不回显),重连。
@@ -26,8 +26,8 @@ Cortico World。宿主:Coopanion(World API 6)。依赖 `@larksuiteoapi/node-sdk`
    - `im:message.p2p_msg:readonly` — 收私聊
    - `im:message.group_msg`(「获取群组中所有消息」)/ `im:message.group_at_msg:readonly`(只收 @ 机器人的)— 群聊
    - `im:message:send_as_bot` — 以机器人身份发消息
-   - `im:message.reactions:read` — 收「有人给消息点了表情」的事件(不开也能用,只是不知道谁点了赞)
-   - `im:resource` — 取消息里的图片/文件资源
+   - `im:message.reactions:read`、`im:message.reactions:write_only` — 收「有人给消息点了表情」的事件、以机器人身份给消息贴表情回复(不开也能正常收发文字和图片)
+   - `im:resource` — 取消息里的图片/文件资源、上传要发的图片
    - `im:chat:readonly`、`im:chat.members:read` — 拉群信息和群成员
    - `contact:user.base:readonly`、`contact:user.department:readonly`、`contact:department.base:readonly` — 认人(名字/部门)
 
@@ -45,13 +45,12 @@ Cortico World。宿主:Coopanion(World API 6)。依赖 `@larksuiteoapi/node-sdk`
 
 - **断线期间的消息不补**:长连接只在进程活着时有效。重启、断网、机器睡眠期间,别人发的消息这个扩展不会知道,也没有补拉(`im:message:readonly` 的回读还没写),只有连上之后的消息能收到。
 - **只能发到见过的会话**:`feishu_reply` 只认进程里收到过消息的 chatId / messageId。想主动给某人私聊、或者新建群发通知,现在做不到。
-- **只能发纯文本**:不能 @ 人,不能发富文本、卡片、按钮;链接也是干链接。
+- **发送格式限制**:支持发纯文本、发图片(仅接受宿主的 `mem:` / `log:` 句柄,拒绝本机文件路径与外部网址)以及给消息贴表情回复(`reaction`);不能在正文里 @ 人,不能发富文本、卡片、按钮;链接也是干链接。
 - **凭证只能填、不能清**:面板没有「清除」。换应用就直接覆盖填一遍;想回到「未填」状态得手工改部署根目录的 `.env`。
 - **表情包(sticker)的图取不到**:飞书「获取消息资源文件」接口明确不支持表情包资源,只能拿到 `[表情]` 占位。普通图片、富文本里夹的图可以取。
 - **表情回复有个前提**:点赞事件(`im.message.reaction.created_v1`)本身不带 `chat_id`,扩展靠本地记过的 messageId→chatId 反查(进程内最多记 2000 条,重启时从 `thread.json` 恢复最近 300 条)。没见过或已滑出缓存的老消息被点赞就不推了;也没开「表情被取消」(`deleted_v1`)——只推加上去的。
 - **语音 / 视频 / 文件**:只有占位文字,不转写、不下载。
 - **部门**:应用和用户不在同一个租户时,通讯录接口查不到,`from:` 里就只有名字(名字来自群成员列表)。
-- **群里「被 @ 才理」**:目前 `replyToGroup` 开着就把群消息全推进来,没有按 @ 过滤。
 - **重名分不清**:名字来自群成员列表的显示名。两个人同名时,`from:` 后面那个 open_id 才是不重样的依据。
 
 ## 报错码对照
@@ -75,7 +74,10 @@ Cortico World。宿主:Coopanion(World API 6)。依赖 `@larksuiteoapi/node-sdk`
 ## 结构
 
 - `src/definition.ts` — `WorldDefinition`,注册工具与事件。
-- `src/world.ts` — 长连接、消息拍平、取图、推送、发送、认人。
+- `src/world.ts` — 长连接生命周期、收发事件主流程、取图、发图/发文字/贴表情、面板与工具接线。
+- `src/normalize.ts` — 消息体拍平(`messageText` / `stripMentions` / `imageKeys`)、表情映射与错误格式化纯函数。
+- `src/store.ts` — 本地状态持久化(`thread.json` / `chats.json` / `state.json`)、已知会话与出站安全校验。
+- `src/contacts.ts` — 认人缓存(`names.json`)、部门查询与 `feishu_roster` 群成员拉取。
 - `src/tools.ts` / `src/config.ts` — 工具声明、配置项。
 - `src/ENV_PROMPT.md` — 环境说明模板,带 `{{feishu.state}}` / `{{feishu.ownerName}}` / `{{feishu.extra}}` 三个变量;称呼和本机专属的规矩都从配置来,所以这份是通用的。
 - `webui.js` — 「会话」与「凭证」两个面板。
@@ -85,6 +87,7 @@ Cortico World。宿主:Coopanion(World API 6)。依赖 `@larksuiteoapi/node-sdk`
 - **启用飞书连接** — 总开关。
 - **只理会这个人的私聊(open_id)** — 只限私聊。填了就只应这个人;别人的私聊只记在会话面板里,不推进来。群里其他人的消息照样进来。
 - **群里说话也推进来** — 群聊是否也进上下文;只想听私聊就关掉。
+- **群里只理会 @ 我或回复我的消息** — 打开后,群聊里只有 @ 机器人或直接回复机器人消息的句子才推进上下文;其他群友闲聊只记在「会话」面板里,不唤醒模型。
 - **每天最多回几条** — 防刷屏,0 不限。
 - **怎么称呼你** — 会话面板和提示词里用这个称呼你;留空就是「对方」。
 - **补充说明(本机专属)** — 接在环境说明后面:口癖、气泡镜像、只在本机成立的规矩,想写什么写什么,留空就没有。

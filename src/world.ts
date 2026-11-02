@@ -3,8 +3,6 @@
 //
 // 注意:凭证只存在宿主的秘密配置里,任何工具回执都不回显 App Secret。
 
-import * as fs from 'node:fs';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as lark from '@larksuiteoapi/node-sdk';
 import type {
@@ -24,6 +22,15 @@ import {
   FEISHU_SECRET_APP_SECRET,
   type FeishuConfigSection,
 } from './config.ts';
+import { FeishuContacts } from './contacts.ts';
+import {
+  REACTION_FACES,
+  describeErr,
+  imageKeys,
+  messageText,
+  normalizeReactionType,
+} from './normalize.ts';
+import { FeishuStore } from './store.ts';
 import { FEISHU_TOOL_DECLS } from './tools.ts';
 
 /**
@@ -33,8 +40,6 @@ import { FEISHU_TOOL_DECLS } from './tools.ts';
  */
 const ENV = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 
-/** 通讯录查不到时先记一小时,免得每条消息都再打一次。面板里清认人缓存会马上重查。 */
-const MISS_TTL_MS = 60 * 60 * 1000;
 /** 单张图片随消息内联等待的上限:快图随原消息一起上,慢图先放行文字、下完再补一条。 */
 const IMAGE_INLINE_WAIT_MS = 1_500;
 /** 单张图片下载总超时。 */
@@ -43,141 +48,6 @@ const IMAGE_FETCH_TIMEOUT_MS = 8_000;
 const COMMIT_SLOT_TIMEOUT_MS = 5_000;
 /** feishu_setup 等待长连接建好或报错的上限。 */
 const CONNECT_WAIT_READY_MS = 4_000;
-/** 群成员超过这个数时 roster 不再逐个补查部门,避免上百次串行请求卡死。 */
-const ROSTER_DEPT_LOOKUP_MAX = 30;
-
-/**
- * 表情回复的 emoji_type 换成看得懂的符号。飞书给的是大写英文键,
- * 对不上号的(自定义表情等)原样带上,不猜。
- */
-const REACTION_FACES: Record<string, string> = {
-  THUMBSUP: '👍',
-  THUMBSDOWN: '👎',
-  HEART: '❤️',
-  SMILE: '😄',
-  LAUGH: '😆',
-  CRY: '😭',
-  SOB: '😭',
-  SURPRISED: '😮',
-  THINKING: '🤔',
-  OK: '👌',
-  DONE: '✅',
-  FIRE: '🔥',
-  CLAP: '👏',
-  MUSCLE: '💪',
-  PRAY: '🙏',
-  PARTY: '🎉',
-  STRONGLY_AGREE: '👌',
-  LOVE_IT: '❤️',
-};
-
-/**
- * 把 `@_user_1` 这类占位换成「@名字(open_id)」。
- * 飞书把被 @ 的人放在 message.mentions 里,名字也给,所以群里能知道叫的是谁;
- * 对不上号的保留一个 [@],别把整句吞掉。sender 的名字飞书不给,只有 open_id。
- */
-function stripMentions(s: string, mentions?: any[]) {
-  const map = new Map<string, string>();
-  for (const m of mentions ?? []) {
-    const key = String(m?.key ?? '');
-    if (!key) continue;
-    const name = String(m?.name ?? '');
-    const id = String(m?.id?.open_id ?? m?.id?.user_id ?? '');
-    map.set(key, `@${name || '未知'}${id ? `(${id})` : ''}`);
-  }
-  return s
-    .replace(/@_user_\d+/g, (k) => map.get(k) ?? '[@]')
-    .replace(/[ \t]+/g, ' ')
-    .trim();
-}
-
-/** 把飞书接口的错误说清楚:带上 code 和 msg,不然只看到一句 400 猜不出原因。 */
-function describeErr(e: unknown): string {
-  const anyErr = e as any;
-  const data = anyErr?.response?.data;
-  const code = data?.code ?? anyErr?.code;
-  const msg = data?.msg ?? anyErr?.msg;
-  if (code || msg) return `code=${code ?? '?'} ${msg ?? ''}`.trim();
-  return e instanceof Error ? e.message : String(e);
-}
-
-/** 一条消息里所有能下的图:普通图片和富文本里夹的图。表情包不在这里,飞书不给下。 */
-function imageKeys(message: any): string[] {
-  const type = String(message?.message_type ?? '');
-  let parsed: any = undefined;
-  try {
-    parsed = typeof message?.content === 'string' ? JSON.parse(message.content) : undefined;
-  } catch {
-    parsed = undefined;
-  }
-  const keys: string[] = [];
-  const push = (k: unknown) => {
-    const key = String(k ?? '');
-    if (key && !keys.includes(key)) keys.push(key);
-  };
-  if (type === 'image') push(parsed?.image_key);
-  // 表情包飞书接口明确不给下,去请求只会把 lastError 写成「收图失败」。
-  if (type === 'post') {
-    const blocks = parsed?.content ?? parsed?.zh_cn?.content ?? parsed?.en_us?.content;
-    if (Array.isArray(blocks)) {
-      for (const line of blocks) {
-        if (!Array.isArray(line)) continue;
-        for (const el of line) if (el?.tag === 'img') push(el?.image_key);
-      }
-    }
-  }
-  return keys;
-}
-
-/** 把飞书消息体拍平成一句可读的话;不认识的消息类型也不丢,标出来。 */
-function messageText(message: any): string {
-  const type = String(message?.message_type ?? '');
-  let parsed: any = undefined;
-  try {
-    parsed = typeof message?.content === 'string' ? JSON.parse(message.content) : undefined;
-  } catch {
-    parsed = undefined;
-  }
-  if (type === 'text') {
-    const raw = String(parsed?.text ?? '');
-    const body = stripMentions(raw, message?.mentions);
-    // 只有 @ 我、没写正文的消息不能丢——在群里那就是"叫一下"。
-    return body || (/@_user_\d+/.test(raw) ? '[@]' : '');
-  }
-  if (type === 'post') {
-    const lines: string[] = [];
-    const blocks = parsed?.content ?? parsed?.zh_cn?.content ?? parsed?.en_us?.content;
-    if (Array.isArray(blocks)) {
-      for (const line of blocks) {
-        if (!Array.isArray(line)) continue;
-        lines.push(
-          line
-            .map((el: any) => {
-              if (el?.tag === 'text') return el.text ?? '';
-              if (el?.tag === 'a') return el.text ?? el.href ?? '';
-              if (el?.tag === 'img') return '[图片]';
-              if (el?.tag === 'at') {
-                const uid = String(el?.user_id ?? '');
-                // 飞书接收事件里 post 的 at.user_id 常是 @_user_1 占位,交给下面的 stripMentions 展开
-                if (/^@_user_\d+$/.test(uid)) return uid;
-                return `@${el?.user_name ?? (uid || '未知')}${uid ? `(${uid})` : ''}`;
-              }
-              return '';
-            })
-            .join(''),
-        );
-      }
-    }
-    const title = parsed?.title ?? parsed?.zh_cn?.title ?? parsed?.en_us?.title;
-    return stripMentions([title, ...lines].filter(Boolean).join('\n'), message?.mentions);
-  }
-  if (type === 'image') return '[图片]';
-  if (type === 'audio') return '[语音]';
-  if (type === 'media') return '[视频]';
-  if (type === 'sticker') return '[表情]';
-  if (type === 'file') return '[文件] ' + String(parsed?.file_name ?? '');
-  return '[未识别的消息:' + type + ']';
-}
 
 export class FeishuWorld implements World {
   readonly id = 'feishu';
@@ -192,25 +62,10 @@ export class FeishuWorld implements World {
   private seen = new Set<string>();
   /** 表情回复事件去重(同一个 event_id 只推一次) */
   private seenReactions = new Set<string>();
-  private stats = { day: '', replies: 0, received: 0 };
-  /** 账本解析失败时为 false:不把今日计数清零,发送也先停,等账本修好或手动归零。 */
-  private statsOk = true;
-  /** 会话流水:给 WebUI 的「会话」面板看,进出都记。`who` 是这一句的说话人(进来的是发信人名)。 */
-  private thread: Array<{ dir: 'in' | 'out'; ts: string; text: string; chatId: string; messageId: string; who?: string; chatType?: string; openId?: string }> = [];
-  /** messageId → chatId 的映射:即使面板清空了会话流水或超过 300 条,也能认出已知消息属于哪个会话。 */
-  private messageChats = new Map<string, string>();
-  /** 见过的会话。没见过的 chatId 不能发。 */
-  private chats = new Map<string, { chatType: string; openId: string }>();
-  /** open_id → 名字的缓存:查到一次就存下来,重启也还在,省得每条消息都去查通讯录。 */
-  private names = new Map<string, string>();
-  /** open_id → 部门名(第一个部门)。没权限或查不到就空着。 */
-  private depts = new Map<string, string>();
-  /** 查过名字但没有结果的时间。过期前不再打通讯录。 */
-  private nameMiss = new Map<string, number>();
-  /** 查过部门但没结果的时间。过期前不再打通讯录。 */
-  private deptMiss = new Map<string, number>();
-  /** 正在查询中的 open_id → Promise,防止并发消息同时穿透缓存重复打通讯录。 */
-  private nameInFlight = new Map<string, Promise<string>>();
+  /** 机器人自身的 open_id 与应用名(由 /open-apis/bot/v3/info 取回),用于群聊只理会 @ 我时精确匹配。 */
+  private botOpenId = '';
+  private botAppName = '';
+  private botInfoInFlight?: Promise<void>;
   /** 投递侧顺序锁:解析阶段各条并发,落盘和 pushEvent 按到达顺序提交,既不顶住后消息也不乱序。 */
   private commitTail: Promise<void> = Promise.resolve();
   private starting?: Promise<void>;
@@ -218,425 +73,21 @@ export class FeishuWorld implements World {
   private generation = 0;
   private enabledSeen = false;
   private syncing = false;
+  private readonly store: FeishuStore;
+  private readonly contacts: FeishuContacts;
 
   constructor(private ctx: WorldContext<FeishuConfigSection>) {
     this.enabledSeen = Boolean(this.ctx.cfg.enabled);
-    this.loadStats();
-    this.loadThread();
-    this.loadChats();
-    this.hydrateChatsFromThread();
-    this.loadNames();
-  }
-
-  // ---------- 会话流水(WebUI 面板用) ----------
-
-  private threadFile() {
-    return join(this.ctx.dataDir, 'feishu', 'thread.json');
-  }
-
-  private chatsFile() {
-    return join(this.ctx.dataDir, 'feishu', 'chats.json');
-  }
-
-  /** 先写临时文件再替换。Windows 上目标已存在时 rename 会失败,先删掉再换。 */
-  private writeJson(file: string, value: unknown) {
-    fs.mkdirSync(join(this.ctx.dataDir, 'feishu'), { recursive: true });
-    const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(value));
-    try {
-      fs.renameSync(tmp, file);
-    } catch {
-      fs.rmSync(file, { force: true });
-      fs.renameSync(tmp, file);
-    }
-  }
-
-  private loadThread() {
-    let text = '';
-    try {
-      text = fs.readFileSync(this.threadFile(), 'utf8');
-    } catch {
-      return;
-    }
-    try {
-      const raw = JSON.parse(text);
-      if (!Array.isArray(raw?.messages)) throw Error('会话流水不是预期的格式');
-      this.thread = raw.messages;
-    } catch {
-      this.lastError = '会话流水读不了,旧文件留在 thread.json.bad';
-      try {
-        fs.renameSync(this.threadFile(), this.threadFile() + '.bad');
-      } catch {
-        // 留在原地也行,下次成功的写入会换掉它
-      }
-    }
-  }
-
-  private loadChats() {
-    try {
-      const raw = JSON.parse(fs.readFileSync(this.chatsFile(), 'utf8'));
-      for (const [id, meta] of Object.entries(raw?.chats ?? {})) {
-        if (!id || !meta || typeof meta !== 'object') continue;
-        const row = meta as { chatType?: unknown; openId?: unknown };
-        this.chats.set(id, { chatType: String(row.chatType ?? ''), openId: String(row.openId ?? '') });
-      }
-    } catch {
-      // 第一次跑,或文件坏了:下面会用流水里的 chatId 补一截
-    }
-  }
-
-  /** 升级前的流水没有会话类型。先把见过的 chatId 放进来,类型等下一条消息补上。 */
-  private hydrateChatsFromThread() {
-    for (const m of this.thread) {
-      const chatId = String(m?.chatId ?? '');
-      const messageId = String(m?.messageId ?? '');
-      if (messageId && chatId) this.rememberMessageChat(messageId, chatId);
-      if (!chatId) continue;
-      const prev = this.chats.get(chatId);
-      const chatType = String(m.chatType ?? '') || prev?.chatType || '';
-      const who = String(m.who ?? '');
-      const openFromWho = /^ou_[0-9a-fA-F]{16,64}$/.test(who) ? who : '';
-      const openId = chatType === 'group' ? '' : (prev?.openId || String(m.openId ?? '') || openFromWho);
-      if (!prev) this.chats.set(chatId, { chatType, openId });
-      else if ((!prev.chatType && chatType) || (!prev.openId && openId)) {
-        this.chats.set(chatId, { chatType: prev.chatType || chatType, openId: prev.openId || openId });
-      }
-    }
-  }
-
-  private saveChats() {
-    try {
-      this.writeJson(this.chatsFile(), { chats: Object.fromEntries(this.chats) });
-    } catch {
-      // 名单写不进去就下次再记;发送侧会拒绝没见过的会话
-    }
-  }
-
-  private noteChat(chatId: string, chatType: string, openId: string) {
-    if (!chatId) return;
-    const prev = this.chats.get(chatId);
-    const nextType = chatType || prev?.chatType || '';
-    const nextOpen = nextType === 'group' ? '' : (openId || prev?.openId || '');
-    if (prev && prev.chatType === nextType && prev.openId === nextOpen) return;
-    this.chats.set(chatId, { chatType: nextType, openId: nextOpen });
-    this.saveChats();
-  }
-
-  private rememberMessageChat(messageId: string, chatId: string) {
-    if (!messageId || !chatId) return;
-    this.messageChats.set(messageId, chatId);
-    if (this.messageChats.size > 2000) {
-      const keep = [...this.messageChats.entries()].slice(-1000);
-      this.messageChats = new Map(keep);
-    }
-  }
-
-  private chatOfMessage(messageId: string): string {
-    const mapped = this.messageChats.get(messageId);
-    if (mapped) return mapped;
-    for (let i = this.thread.length - 1; i >= 0; i -= 1) {
-      if (this.thread[i]?.messageId === messageId && this.thread[i]?.chatId) return this.thread[i].chatId;
-    }
-    return '';
-  }
-
-  private record(dir: 'in' | 'out', text: string, chatId: string, messageId: string, who = '', chatType = '', openId = '') {
-    this.rememberMessageChat(messageId, chatId);
-    this.thread.push({
-      dir,
-      ts: nowIso(this.ctx.timezone),
-      text,
-      chatId,
-      messageId,
-      who,
-      ...(chatType ? { chatType } : {}),
-      ...(openId ? { openId } : {}),
+    this.store = new FeishuStore(this.ctx.dataDir, this.ctx.timezone, (msg) => {
+      this.lastError = msg;
     });
-    if (this.thread.length > 300) this.thread = this.thread.slice(-300);
-    try {
-      this.writeJson(this.threadFile(), { messages: this.thread });
-    } catch {
-      // 流水写不进去不影响收发
-    }
-  }
-
-  // ---------- 本地小账本:每天回了几条 ----------
-
-  private statsFile() {
-    return join(this.ctx.dataDir, 'feishu', 'state.json');
-  }
-
-  private loadStats() {
-    let text = '';
-    try {
-      text = fs.readFileSync(this.statsFile(), 'utf8');
-    } catch {
-      return;
-    }
-    try {
-      const raw = JSON.parse(text);
-      const replies = Number(raw?.replies);
-      const received = Number(raw?.received);
-      if (!raw || typeof raw !== 'object' || !Number.isFinite(replies) || !Number.isFinite(received)) {
-        throw Error('账本不是预期的格式');
-      }
-      this.stats = { day: String(raw.day ?? ''), replies, received };
-      this.statsOk = true;
-    } catch {
-      this.statsOk = false;
-      this.lastError = '账本读不了,今日计数先不动,发送也先停';
-    }
-  }
-
-  private saveStats(force = false) {
-    if (!this.statsOk && !force) return;
-    try {
-      this.writeJson(this.statsFile(), this.stats);
-      this.statsOk = true;
-    } catch (e) {
-      this.statsOk = false;
-      this.lastError = e instanceof Error ? e.message : '账本写不进去';
-    }
-  }
-
-  private rollDay() {
-    if (!this.statsOk) return;
-    const today = new Intl.DateTimeFormat('sv-SE', { timeZone: this.ctx.timezone || 'Asia/Shanghai' }).format(new Date());
-    if (this.stats.day !== today) {
-      this.stats = { day: today, replies: 0, received: 0 };
-      this.saveStats();
-    }
-  }
-
-  // ---------- 认人:open_id → 名字 ----------
-
-  private namesFile() {
-    return join(this.ctx.dataDir, 'feishu', 'names.json');
-  }
-
-  private loadNames() {
-    try {
-      const raw = JSON.parse(fs.readFileSync(this.namesFile(), 'utf8')) ?? {};
-      // 老格式是扁平的 {open_id: 名字};新格式多存一份部门,两种都认。
-      const nameMap = raw?.names && typeof raw.names === 'object' ? raw.names : raw;
-      for (const [id, name] of Object.entries(nameMap ?? {})) {
-        if (typeof name === 'string' && name) this.names.set(id, name);
-      }
-      for (const [id, dept] of Object.entries(raw?.depts ?? {})) {
-        if (typeof dept === 'string' && dept) this.depts.set(id, dept);
-      }
-      this.readMisses(this.nameMiss, raw?.nameMiss);
-      this.readMisses(this.deptMiss, raw?.deptMiss);
-    } catch {
-      // 第一次跑,还没有名单
-    }
-  }
-
-  private readMisses(into: Map<string, number>, raw: unknown) {
-    if (!raw || typeof raw !== 'object') return;
-    for (const [id, at] of Object.entries(raw as Record<string, unknown>)) {
-      const ts = Number(at);
-      if (id && Number.isFinite(ts)) into.set(id, ts);
-    }
-  }
-
-  private saveNames() {
-    try {
-      this.writeJson(this.namesFile(), {
-        names: Object.fromEntries(this.names),
-        depts: Object.fromEntries(this.depts),
-        nameMiss: Object.fromEntries(this.nameMiss),
-        deptMiss: Object.fromEntries(this.deptMiss),
-      });
-    } catch {
-      // 名单存不下不影响收发,下次再查一遍而已
-    }
-  }
-
-  private missFresh(map: Map<string, number>, id: string) {
-    const at = map.get(id);
-    if (!at) return false;
-    if (Date.now() - at > MISS_TTL_MS) {
-      map.delete(id);
-      return false;
-    }
-    return true;
-  }
-
-  /** 负缓存。没连上时不要记,免得把「还没启动」记成「这个人查不到」。 */
-  private rememberMiss(map: Map<string, number>, id: string, deferSave = false) {
-    if (!id) return;
-    map.set(id, Date.now());
-    if (!deferSave) this.saveNames();
-  }
-
-  /**
-   * 拿 open_id 换名字,查到的记进缓存。
-   * 要「通讯录读取」权限,而且这个人得在应用的可用范围里,否则只会拿到空字串(不报错)。
-   */
-  private async resolveName(openId: string, deferSave = false): Promise<string> {
-    if (!openId) return '';
-    const hit = this.names.get(openId);
-    if (hit) {
-      // 名字有缓存,部门可能还没有——补查一次,查不到就算了。
-      if (!this.depts.has(openId) && !this.missFresh(this.deptMiss, openId)) await this.resolveDept(openId, deferSave);
-      return hit;
-    }
-    if (this.missFresh(this.nameMiss, openId) || !this.client) return '';
-    const inflight = this.nameInFlight.get(openId);
-    if (inflight) return inflight;
-    const task = (async () => {
-      try {
-        const res: any = await this.client.contact.user.get({
-          path: { user_id: openId },
-          params: { user_id_type: 'open_id', department_id_type: 'open_department_id' },
-        });
-        const user = res?.data?.user;
-        const name = String(user?.name ?? '');
-        if (!name) {
-          this.rememberMiss(this.nameMiss, openId, deferSave);
-          return '';
-        }
-        this.names.set(openId, name);
-        this.nameMiss.delete(openId);
-        const firstDeptId = String(user?.department_ids?.[0] ?? '');
-        if (firstDeptId) {
-          const dept = await this.deptName(firstDeptId);
-          if (dept) {
-            this.depts.set(openId, dept);
-            this.deptMiss.delete(openId);
-          } else {
-            this.deptMiss.set(openId, Date.now());
-          }
-        } else if (user?.job_title) {
-          this.depts.set(openId, String(user.job_title));
-          this.deptMiss.delete(openId);
-        } else {
-          this.deptMiss.set(openId, Date.now());
-        }
-        if (!deferSave) this.saveNames();
-        return name;
-      } catch {
-        // 跨租户、个人版没有组织架构时这里会 41050。记一笔就好,别盖住连接状态。
-        this.rememberMiss(this.nameMiss, openId, deferSave);
-        return '';
-      } finally {
-        this.nameInFlight.delete(openId);
-      }
-    })();
-    this.nameInFlight.set(openId, task);
-    return task;
-  }
-
-  /** 只补部门:通讯录里按 open_id 查一次,把第一个部门的名字记下来。 */
-  private async resolveDept(openId: string, deferSave = false): Promise<string> {
-    if (!this.client || !openId || this.missFresh(this.deptMiss, openId)) return '';
-    try {
-      const res: any = await this.client.contact.user.get({
-        path: { user_id: openId },
-        params: { user_id_type: 'open_id', department_id_type: 'open_department_id' },
-      });
-      const user = res?.data?.user;
-      const firstDeptId = String(user?.department_ids?.[0] ?? '');
-      const dept = firstDeptId ? await this.deptName(firstDeptId) : String(user?.job_title ?? '');
-      if (dept) {
-        this.depts.set(openId, dept);
-        this.deptMiss.delete(openId);
-        if (!deferSave) this.saveNames();
-      } else {
-        this.rememberMiss(this.deptMiss, openId, deferSave);
-      }
-      return dept;
-    } catch {
-      this.rememberMiss(this.deptMiss, openId, deferSave);
-      return '';
-    }
-  }
-
-  /** 部门 id → 部门名。先按 open_department_id 查,不行再用默认参数查一次。 */
-  private async deptName(departmentId: string): Promise<string> {
-    if (!this.client || !departmentId) return '';
-    try {
-      const res: any = await this.client.contact.department.get({
-        path: { department_id: departmentId },
-        params: { user_id_type: 'open_id', department_id_type: 'open_department_id' },
-      });
-      return String(res?.data?.department?.name ?? '');
-    } catch {
-      try {
-        const res: any = await this.client.contact.department.get({
-          path: { department_id: departmentId },
-        });
-        return String(res?.data?.department?.name ?? '');
-      } catch {
-        return '';
-      }
-    }
-  }
-
-  /** 谁在跟这个人说话:名字(+部门),查不到名字就把 open_id 原样带上,至少能分清是两个人。 */
-  private label(openId: string, name: string) {
-    if (!openId) return '';
-    if (!name) return openId;
-    const dept = this.depts.get(openId) ?? '';
-    return `${name}(${openId}${dept ? ` · ${dept}` : ''})`;
-  }
-
-  /** 群成员名单:一次拉全(翻页),顺手把名字和部门补进缓存。 */
-  private async roster(chatId: string): Promise<ToolOutcome> {
-    if (!chatId) throw Error('chatId 不能为空');
-    if (!this.client) throw Error('飞书还没连上,先在设置里填好凭证');
-    const rawItems: Array<{ openId: string; rawName: string; type: string }> = [];
-    let pageToken = '';
-    for (let page = 0; page < 20; page += 1) {
-      let res: any;
-      try {
-        res = await this.client.im.chatMembers.get({
-          path: { chat_id: chatId },
-          params: { member_id_type: 'open_id', page_size: 100, ...(pageToken ? { page_token: pageToken } : {}) },
-        });
-      } catch (e) {
-        const why = describeErr(e);
-        this.lastError = '拉群成员失败:' + why;
-        throw Error('拉群成员失败:' + why);
-      }
-      for (const it of res?.data?.items ?? []) {
-        const openId = String(it?.member_id ?? '');
-        if (!openId) continue;
-        rawItems.push({
-          openId,
-          rawName: String(it?.name ?? ''),
-          type: String(it?.member_id_type ?? ''),
-        });
-      }
-      pageToken = String(res?.data?.page_token ?? '');
-      if (!res?.data?.has_more || !pageToken) break;
-    }
-    const lookupDept = rawItems.length <= ROSTER_DEPT_LOOKUP_MAX;
-    const members: Array<{ openId: string; name: string; dept: string; type: string }> = [];
-    for (const it of rawItems) {
-      const { openId, rawName, type } = it;
-      const cached = this.names.get(openId) ?? '';
-      const name = rawName || cached || (await this.resolveName(openId, true));
-      if (name) {
-        this.names.set(openId, name);
-        this.nameMiss.delete(openId);
-      }
-      const dept = this.depts.get(openId) || (lookupDept && openId ? await this.resolveDept(openId, true) : '');
-      members.push({ openId, name, dept, type });
-    }
-    this.saveNames();
-    let title = '';
-    try {
-      const info: any = await this.client.im.chat.get({
-        path: { chat_id: chatId },
-        params: { user_id_type: 'open_id' },
-      });
-      title = String(info?.data?.name ?? '');
-    } catch {
-      // 群名拿不到无所谓,成员名单才是重点
-    }
-    return { text: JSON.stringify({ chatId, title, count: members.length, members }) };
+    this.contacts = new FeishuContacts(
+      this.ctx.dataDir,
+      () => this.client,
+      (msg) => {
+        this.lastError = msg;
+      },
+    );
   }
 
   // ---------- 生命周期 ----------
@@ -675,8 +126,60 @@ export class FeishuWorld implements World {
     }
     await this.stopConnection();
     this.client = undefined;
+    this.botOpenId = '';
+    this.botAppName = '';
+    this.botInfoInFlight = undefined;
     this.connected = false;
     this.host = undefined;
+  }
+
+  /** 取一次机器人自身的 open_id 与应用名,供群聊「只理会 @ 我」匹配。无需额外权限(只要应用开启了机器人能力)。 */
+  private async ensureBotIdentity(): Promise<void> {
+    if (this.botOpenId || !this.client) return;
+    if (this.botInfoInFlight) return this.botInfoInFlight;
+    const task = (async () => {
+      try {
+        const res: any = await this.client.request({
+          url: '/open-apis/bot/v3/info',
+          method: 'GET',
+        });
+        const bot = res?.bot ?? res?.data?.bot;
+        const openId = String(bot?.open_id ?? '').trim();
+        const appName = String(bot?.app_name ?? '').trim();
+        if (openId) this.botOpenId = openId;
+        if (appName) this.botAppName = appName;
+      } catch {
+        // 断网或凭证未就绪时忽略,下次用到再试
+      } finally {
+        this.botInfoInFlight = undefined;
+      }
+    })();
+    this.botInfoInFlight = task;
+    return task;
+  }
+
+  /** 群消息是否算「叫了机器人」:@ 了机器人本人,或直接回复/引用了机器人发出的消息。 */
+  private async isAddressingBot(message: any): Promise<boolean> {
+    const parentId = String(message?.parent_id ?? '').trim();
+    const rootId = String(message?.root_id ?? '').trim();
+    if ((parentId && this.store.isOwnMessage(parentId)) || (rootId && this.store.isOwnMessage(rootId))) {
+      return true;
+    }
+    const mentions = Array.isArray(message?.mentions) ? message.mentions : [];
+    if (!mentions.length) return false;
+    await this.ensureBotIdentity();
+    for (const m of mentions) {
+      const key = String(m?.key ?? '');
+      if (key === '@_all') continue;
+      const openId = String(m?.id?.open_id ?? '').trim();
+      const name = String(m?.name ?? '').trim();
+      if (this.botOpenId) {
+        if (openId === this.botOpenId) return true;
+      } else if (this.botAppName && name === this.botAppName) {
+        return true;
+      }
+    }
+    return false;
   }
 
   onRunPhase(phase: RunPhase) {
@@ -690,7 +193,7 @@ export class FeishuWorld implements World {
     const run = (async () => {
       await this.stopConnection();
       if (gen !== this.generation) return;
-      if (this.statsOk) this.lastError = undefined;
+      if (this.store.statsOk) this.lastError = undefined;
       const appId = this.ctx.secret(FEISHU_SECRET_APP_ID);
       const appSecret = this.ctx.secret(FEISHU_SECRET_APP_SECRET);
       if (!appId || !appSecret) {
@@ -743,7 +246,8 @@ export class FeishuWorld implements World {
             }
             this.connected = true;
             this.connError = undefined;
-            if (this.statsOk) this.lastError = undefined;
+            if (this.store.statsOk) this.lastError = undefined;
+            void this.ensureBotIdentity();
             settleReady();
           },
           onError: (e: unknown) => {
@@ -764,7 +268,7 @@ export class FeishuWorld implements World {
             if (gen !== this.generation) return;
             this.connected = true;
             this.connError = undefined;
-            if (this.statsOk) this.lastError = undefined;
+            if (this.store.statsOk) this.lastError = undefined;
           },
         });
         const pendingStart = this.ws.start({
@@ -825,6 +329,9 @@ export class FeishuWorld implements World {
       // 旧连接本来就没起
     }
     this.ws = undefined;
+    this.botOpenId = '';
+    this.botAppName = '';
+    this.botInfoInFlight = undefined;
     this.connected = false;
     this.connError = undefined;
   }
@@ -877,27 +384,42 @@ export class FeishuWorld implements World {
     if (String(sender?.sender_type ?? '') === 'app') return; // 机器人自己发的,不理,免得自问自答
     const openId = String(sender?.sender_id?.open_id ?? '');
     const chatId = String(message.chat_id ?? '');
-    this.noteChat(chatId, chatType, openId);
+    this.store.noteChat(chatId, chatType, openId);
     const owner = String(cfg.ownerOpenId ?? '').trim();
     // 只限制私聊。群里其他人的话照样推进来,靠 from 区分是谁。
     if (chatType !== 'group' && owner && openId && openId !== owner) {
       const skipped = messageText(message);
-      this.rollDay();
-      this.stats.received += 1;
-      this.saveStats();
-      this.record('in', skipped || '[私聊已忽略]', chatId, String(message.message_id), this.names.get(openId) || openId, chatType, openId);
+      this.store.rollDay();
+      this.store.stats.received += 1;
+      this.store.saveStats();
+      this.store.record('in', skipped || '[私聊已忽略]', chatId, String(message.message_id), this.contacts.names.get(openId) || openId, chatType, openId);
       return;
     }
 
     // 在第一个 await 之前占好提交槽位,保证上游看到的顺序严格等于消息到达顺序
     const commit = this.reserveCommit();
     try {
+      // 群聊「只理会 @ 我或回复我」:没叫机器人的群消息只记在会话面板流水里,不推事件唤醒模型。
+      if (chatType === 'group' && cfg.groupMentionOnly) {
+        const addressed = await this.isAddressingBot(message);
+        if (!addressed) {
+          const skipped = messageText(message);
+          await commit(() => {
+            this.store.rollDay();
+            this.store.stats.received += 1;
+            this.store.saveStats();
+            this.store.record('in', skipped || '[群聊未@我]', chatId, String(message.message_id), this.contacts.names.get(openId) || openId, chatType, openId);
+          });
+          return;
+        }
+      }
+
       // @ 的人:飞书有时只给占位不给名字,补查一下,群里才认得出叫的是谁。
       if (Array.isArray(message?.mentions)) {
         for (const m of message.mentions) {
           const id = String(m?.id?.open_id ?? '');
           if (!m?.name && id) {
-            const name = await this.resolveName(id);
+            const name = await this.contacts.resolveName(id);
             if (name) m.name = name;
           }
         }
@@ -907,7 +429,7 @@ export class FeishuWorld implements World {
         await commit(() => {});
         return;
       }
-      const senderName = await this.resolveName(openId);
+      const senderName = await this.contacts.resolveName(openId);
 
       // 图片:并发启动下载,先等一小段(IMAGE_INLINE_WAIT_MS);
       // 赶上的直接随原消息附上,超时的先放行文字,等下完再补一条带图事件,免得慢图顶住后面的消息。
@@ -950,10 +472,10 @@ export class FeishuWorld implements World {
 
       const who = chatType === 'group' ? '飞书群' : '飞书私聊';
       await commit(async () => {
-        this.rollDay();
-        this.stats.received += 1;
-        this.saveStats();
-        this.record('in', text, chatId, String(message.message_id), senderName || openId, chatType, openId);
+        this.store.rollDay();
+        this.store.stats.received += 1;
+        this.store.saveStats();
+        this.store.record('in', text, chatId, String(message.message_id), senderName || openId, chatType, openId);
 
         try {
           await this.host?.pushEvent({
@@ -966,19 +488,19 @@ export class FeishuWorld implements World {
               `[${who}] ` +
               text +
               `\n(chatId: ${message.chat_id} · messageId: ${message.message_id}` +
-              (openId ? ` · from: ${this.label(openId, senderName)}` : '') +
+              (openId ? ` · from: ${this.contacts.label(openId, senderName)}` : '') +
               `)`,
             meta: {
               chatId: String(message.chat_id ?? ''),
               messageId: String(message.message_id),
               openId,
               senderName,
-              senderDept: this.depts.get(openId) ?? '',
+              senderDept: this.contacts.depts.get(openId) ?? '',
               chatType,
             },
             ...(blobs ? { blobs } : {}),
           });
-          if (this.statsOk && !this.connError && !localError) this.lastError = undefined;
+          if (this.store.statsOk && !this.connError && !localError) this.lastError = undefined;
         } catch (e) {
           this.lastError = e instanceof Error ? e.message : '推不上来';
         }
@@ -997,14 +519,14 @@ export class FeishuWorld implements World {
             text:
               `[${who}] [图片附件，来自消息 ${message.message_id}]` +
               `\n(chatId: ${message.chat_id} · messageId: ${message.message_id}` +
-              (openId ? ` · from: ${this.label(openId, senderName)}` : '') +
+              (openId ? ` · from: ${this.contacts.label(openId, senderName)}` : '') +
               `)`,
             meta: {
               chatId: String(message.chat_id ?? ''),
               messageId: String(message.message_id),
               openId,
               senderName,
-              senderDept: this.depts.get(openId) ?? '',
+              senderDept: this.contacts.depts.get(openId) ?? '',
               chatType,
             },
             blobs: [{
@@ -1047,10 +569,10 @@ export class FeishuWorld implements World {
     this.seenReactions.add(eventId);
     if (this.seenReactions.size > 800) this.seenReactions = new Set([...this.seenReactions].slice(-400));
 
-    const chatId = this.chatOfMessage(messageId);
+    const chatId = this.store.chatOfMessage(messageId);
     if (!chatId) return;
     const cfg = this.ctx.cfg;
-    const chatInfo = this.chats.get(chatId);
+    const chatInfo = this.store.chats.get(chatId);
     const chatType = chatInfo?.chatType || 'p2p';
     if (chatType === 'group' && !cfg.replyToGroup) return;
 
@@ -1058,23 +580,31 @@ export class FeishuWorld implements World {
     const owner = String(cfg.ownerOpenId ?? '').trim();
     const peerOpenId = openId || chatInfo?.openId || '';
     if (chatType !== 'group' && owner && peerOpenId !== owner) {
-      this.rollDay();
-      this.stats.received += 1;
-      this.saveStats();
-      this.record('in', `[表情回复] ${face} 给消息 ${messageId}`, chatId, '', this.names.get(openId) || openId, chatType, openId);
+      this.store.rollDay();
+      this.store.stats.received += 1;
+      this.store.saveStats();
+      this.store.record('in', `[表情回复] ${face} 给消息 ${messageId}`, chatId, '', this.contacts.names.get(openId) || openId, chatType, openId);
+      return;
+    }
+
+    const mine = this.store.isOwnMessage(messageId);
+    if (chatType === 'group' && cfg.groupMentionOnly && !mine) {
+      this.store.rollDay();
+      this.store.stats.received += 1;
+      this.store.saveStats();
+      this.store.record('in', `[表情回复] ${face} 给消息 ${messageId}`, chatId, '', this.contacts.names.get(openId) || openId, chatType, openId);
       return;
     }
 
     const commit = this.reserveCommit();
     try {
-      const senderName = await this.resolveName(openId);
-      const mine = this.thread.some((t) => t.messageId === messageId && t.dir === 'out');
+      const senderName = await this.contacts.resolveName(openId);
       const who = chatType === 'group' ? '飞书群' : '飞书私聊';
       await commit(async () => {
-        this.rollDay();
-        this.stats.received += 1;
-        this.saveStats();
-        this.record('in', `[表情回复] ${face} 给消息 ${messageId}`, chatId, '', senderName || openId, chatType, openId);
+        this.store.rollDay();
+        this.store.stats.received += 1;
+        this.store.saveStats();
+        this.store.record('in', `[表情回复] ${face} 给消息 ${messageId}`, chatId, '', senderName || openId, chatType, openId);
         try {
           await this.host?.pushEvent({
             type: 'feishu.message',
@@ -1085,7 +615,7 @@ export class FeishuWorld implements World {
             text:
               `[${who}] [表情回复] 给消息 ${messageId} 加了表情 ${face}` +
               `\n(chatId: ${chatId} · messageId: ${messageId}` +
-              (openId ? ` · from: ${this.label(openId, senderName)}` : '') +
+              (openId ? ` · from: ${this.contacts.label(openId, senderName)}` : '') +
               (mine ? ' · 这条是你发的' : '') +
               ')',
             meta: {
@@ -1093,12 +623,12 @@ export class FeishuWorld implements World {
               messageId,
               openId,
               senderName,
-              senderDept: this.depts.get(openId) ?? '',
+              senderDept: this.contacts.depts.get(openId) ?? '',
               chatType,
               reaction: emoji,
             },
           });
-          if (this.statsOk && !this.connError) this.lastError = undefined;
+          if (this.store.statsOk && !this.connError) this.lastError = undefined;
         } catch (e) {
           this.lastError = e instanceof Error ? e.message : '推不上来';
         }
@@ -1162,39 +692,33 @@ export class FeishuWorld implements World {
 
   // ---------- 发消息 ----------
 
-  /** 只发给本进程见过的会话。群和还不知道类型的会话里,正文不能带内部编号。 */
-  private assertChat(chatId: string, text: string) {
-    const known = this.chats.get(chatId);
-    if (!known) throw Error('没见过这个会话,不能发');
-    if (known.chatType === 'group' && !this.ctx.cfg.replyToGroup) throw Error('群发关着,这条不发');
-    const owner = String(this.ctx.cfg.ownerOpenId ?? '').trim();
-    if (owner && known.chatType !== 'group') {
-      if (known.chatType !== 'p2p' || !known.openId) {
-        throw Error('这个会话认不出是谁,先让对方发一句再回');
-      }
-      if (known.openId !== owner) {
-        throw Error('这个私聊不是主人的,不发');
-      }
-    }
-    const leaksId = /(?:ou|oc)_[0-9a-fA-F]{16,64}/.test(text);
-    if (leaksId && known.chatType !== 'p2p') throw Error('这条会把 open_id 或 chatId 发出去,先改掉再发');
-  }
-
   private async send(args: Record<string, unknown>): Promise<ToolOutcome> {
     if (!this.client) throw Error('飞书还没连上,先在设置里填好凭证');
-    if (!this.statsOk) throw Error(this.lastError || '账本读不了,先不发');
-    this.rollDay();
+    if (!this.store.statsOk) throw Error(this.lastError || '账本读不了,先不发');
+    this.store.rollDay();
     const limit = this.ctx.cfg.maxDailyReplies || 0;
-    if (limit > 0 && this.stats.replies >= limit) throw Error(`今天已经回了 ${this.stats.replies} 条,到上限了`);
+    if (limit > 0 && this.store.stats.replies >= limit) throw Error(`今天已经回了 ${this.store.stats.replies} 条,到上限了`);
 
-    const text = String(args.text ?? '');
-    if (!text.trim()) throw Error('要说的话不能是空的');
+    const text = typeof args.text === 'string' ? args.text : '';
+    const trimmedText = text.trim();
+    const imageHandle = typeof args.image === 'string' ? args.image.trim() : '';
+    const rawReaction = typeof args.reaction === 'string' ? args.reaction.trim() : '';
+    const reactionType = rawReaction ? normalizeReactionType(rawReaction) : '';
+
+    if (!trimmedText && !imageHandle && !reactionType) {
+      throw Error('text、image、reaction 至少要填一项');
+    }
+
     const messageId = typeof args.messageId === 'string' ? args.messageId.trim() : '';
     const requestedChat = typeof args.chatId === 'string' ? args.chatId.trim() : '';
+    if (reactionType && !messageId) {
+      throw Error('贴表情(reaction)必须传 messageId');
+    }
+
     let chatId = requestedChat;
     if (messageId) {
-      const known = this.chatOfMessage(messageId);
-      if (!known) throw Error('没见过这条消息,不能回复');
+      const known = this.store.chatOfMessage(messageId);
+      if (!known) throw Error('没见过这条消息,不能回复或贴表情');
       if (requestedChat && requestedChat !== known) {
         throw Error('messageId 所在的会话和传入的 chatId 不一致,请核对后再发');
       }
@@ -1202,44 +726,150 @@ export class FeishuWorld implements World {
     } else if (!chatId) {
       throw Error('要么给 messageId,要么给 chatId');
     }
-    this.assertChat(chatId, text);
-    const content = JSON.stringify({ text: text.slice(0, 3000) });
+    this.store.assertChat(chatId, trimmedText, this.ctx.cfg);
 
-    let res: any;
-    try {
-      if (messageId) {
-        res = await this.client.im.message.reply({
-          path: { message_id: messageId },
-          data: { msg_type: 'text', content },
-        });
-      } else {
-        res = await this.client.im.message.create({
-          params: { receive_id_type: 'chat_id' },
-          data: { receive_id: chatId, msg_type: 'text', content },
-        });
+    // 校验并读取宿主图片句柄(仅允许 mem: 与 log:,拒绝本机文件路径或 URL)
+    let imageBytes: Buffer | undefined;
+    if (imageHandle) {
+      if (!/^(?:mem|log):/.test(imageHandle)) {
+        throw Error('image 只接受宿主的 mem: 或 log: 句柄,不接受文件路径或网址');
       }
-    } catch (e) {
-      const why = describeErr(e);
-      this.lastError = '发送失败:' + why;
-      return { text: JSON.stringify({ status: 'failed', error: why, note: '没发出去;先看是不是权限或 chatId 不对' }), failed: true };
+      const blob = this.host?.blob(imageHandle);
+      if (!blob || !blob.bytes?.byteLength) {
+        throw Error(`找不到图片句柄(${imageHandle}),或内容为空`);
+      }
+      if (!String(blob.mime ?? '').toLowerCase().startsWith('image/')) {
+        throw Error(`句柄(${imageHandle})不是图片类型(mime=${blob.mime || '未知'})`);
+      }
+      if (blob.bytes.byteLength > 10 * 1024 * 1024) {
+        throw Error(`图片超过飞书 10MB 上限(${blob.bytes.byteLength} 字节)`);
+      }
+      imageBytes = Buffer.from(blob.bytes);
     }
 
-    const code = res?.code ?? res?.data?.code ?? 0;
-    if (code !== 0) {
-      this.lastError = `发送失败 ${code}:${res?.msg ?? ''}`;
-      return { text: JSON.stringify({ status: 'failed', code, msg: res?.msg ?? '', note: '没发出去;先看是不是权限或 chatId 不对' }), failed: true };
+    const meta = this.store.chats.get(chatId);
+    let reactionId = '';
+    let imageMessageId = '';
+    let textMessageId = '';
+    const bumpRepliesIfSent = () => {
+      if (reactionId || imageMessageId || textMessageId) {
+        this.store.stats.replies += 1;
+        this.store.saveStats();
+      }
+    };
+
+    // 1. 贴表情回复
+    if (reactionType) {
+      try {
+        const r: any = await this.client.im.messageReaction.create({
+          path: { message_id: messageId },
+          data: { reaction_type: { emoji_type: reactionType } },
+        });
+        const code = r?.code ?? r?.data?.code ?? 0;
+        if (code !== 0) {
+          const why = `code=${code} ${r?.msg ?? ''}`.trim();
+          this.lastError = '贴表情失败:' + why;
+          return { text: JSON.stringify({ status: 'failed', step: 'reaction', code, msg: r?.msg ?? '', note: '表情没贴上;检查是否开启了 im:message.reactions:write_only 权限或 emoji_type 是否正确' }), failed: true };
+        }
+        reactionId = String(r?.data?.reaction_id ?? r?.reaction_id ?? 'ok');
+        const face = REACTION_FACES[reactionType] ? `${REACTION_FACES[reactionType]}(${reactionType})` : reactionType;
+        this.store.record('out', `[表情回复] ${face} → ${messageId}`, chatId, '', '', meta?.chatType ?? '', meta?.openId ?? '');
+      } catch (e) {
+        const why = describeErr(e);
+        this.lastError = '贴表情失败:' + why;
+        return { text: JSON.stringify({ status: 'failed', step: 'reaction', error: why, note: '表情没贴上;检查是否开启了 im:message.reactions:write_only 权限或 emoji_type 是否正确' }), failed: true };
+      }
     }
-    this.stats.replies += 1;
-    this.saveStats();
-    if (this.statsOk && !this.connError) this.lastError = undefined;
-    const outId = String(res?.data?.message_id ?? '');
-    const meta = this.chats.get(chatId);
-    this.record('out', text, chatId, outId, '', meta?.chatType ?? '', meta?.openId ?? '');
+
+    // 2. 上传并发送图片
+    if (imageBytes) {
+      let imageKey = '';
+      try {
+        const up: any = await this.client.im.image.create({
+          data: { image_type: 'message', image: imageBytes },
+        });
+        imageKey = String(up?.image_key ?? up?.data?.image_key ?? '');
+        if (!imageKey) throw Error('飞书未返回 image_key');
+      } catch (e) {
+        const why = describeErr(e);
+        this.lastError = '上传图片失败:' + why;
+        bumpRepliesIfSent();
+        return { text: JSON.stringify({ status: 'failed', step: 'upload_image', error: why, note: '图片上传失败;请检查 im:resource 权限与图片大小(上限 10MB)' }), failed: true };
+      }
+
+      const imgContent = JSON.stringify({ image_key: imageKey });
+      let imgRes: any;
+      try {
+        if (messageId) {
+          imgRes = await this.client.im.message.reply({
+            path: { message_id: messageId },
+            data: { msg_type: 'image', content: imgContent },
+          });
+        } else {
+          imgRes = await this.client.im.message.create({
+            params: { receive_id_type: 'chat_id' },
+            data: { receive_id: chatId, msg_type: 'image', content: imgContent },
+          });
+        }
+      } catch (e) {
+        const why = describeErr(e);
+        this.lastError = '发图失败:' + why;
+        bumpRepliesIfSent();
+        return { text: JSON.stringify({ status: 'failed', step: 'send_image', error: why }), failed: true };
+      }
+      const imgCode = imgRes?.code ?? imgRes?.data?.code ?? 0;
+      if (imgCode !== 0) {
+        this.lastError = `发图失败 ${imgCode}:${imgRes?.msg ?? ''}`;
+        bumpRepliesIfSent();
+        return { text: JSON.stringify({ status: 'failed', step: 'send_image', code: imgCode, msg: imgRes?.msg ?? '' }), failed: true };
+      }
+      imageMessageId = String(imgRes?.data?.message_id ?? '');
+      this.store.record('out', `[图片] ${imageHandle}`, chatId, imageMessageId, '', meta?.chatType ?? '', meta?.openId ?? '');
+    }
+
+    // 3. 发送文字
+    if (trimmedText) {
+      const content = JSON.stringify({ text: text.slice(0, 3000) });
+      let res: any;
+      try {
+        if (messageId) {
+          res = await this.client.im.message.reply({
+            path: { message_id: messageId },
+            data: { msg_type: 'text', content },
+          });
+        } else {
+          res = await this.client.im.message.create({
+            params: { receive_id_type: 'chat_id' },
+            data: { receive_id: chatId, msg_type: 'text', content },
+          });
+        }
+      } catch (e) {
+        const why = describeErr(e);
+        this.lastError = '发送失败:' + why;
+        bumpRepliesIfSent();
+        return { text: JSON.stringify({ status: 'failed', step: 'send_text', error: why, note: '没发出去;先看是不是权限或 chatId 不对' }), failed: true };
+      }
+
+      const code = res?.code ?? res?.data?.code ?? 0;
+      if (code !== 0) {
+        this.lastError = `发送失败 ${code}:${res?.msg ?? ''}`;
+        bumpRepliesIfSent();
+        return { text: JSON.stringify({ status: 'failed', step: 'send_text', code, msg: res?.msg ?? '', note: '没发出去;先看是不是权限或 chatId 不对' }), failed: true };
+      }
+      textMessageId = String(res?.data?.message_id ?? '');
+      this.store.record('out', text, chatId, textMessageId, '', meta?.chatType ?? '', meta?.openId ?? '');
+    }
+
+    bumpRepliesIfSent();
+    if (this.store.statsOk && !this.connError) this.lastError = undefined;
+    const outId = textMessageId || imageMessageId;
     return {
       text: JSON.stringify({
         status: 'sent',
-        messageId: outId,
-        today: this.stats.replies,
+        ...(outId ? { messageId: outId } : {}),
+        ...(imageMessageId && textMessageId ? { imageMessageId } : {}),
+        ...(reactionId ? { reaction: reactionType, reactionId } : {}),
+        today: this.store.stats.replies,
       }),
     };
   }
@@ -1288,11 +918,11 @@ export class FeishuWorld implements World {
   async invokePanel(panel: string, method: string, args: unknown[] = []): Promise<unknown> {
     this.followEnabled();
     if (panel === 'chat' && method === 'list') {
-      this.rollDay(); // 过了零点再打开面板时,别还显示昨天的数
+      this.store.rollDay(); // 过了零点再打开面板时,别还显示昨天的数
       return {
-        messages: this.thread,
+        messages: this.store.thread,
         connected: this.connected,
-        today: this.stats,
+        today: this.store.stats,
         lastError: this.lastError ?? '',
         ownerName: String(this.ctx.cfg.ownerName ?? '').trim(),
       };
@@ -1314,20 +944,20 @@ export class FeishuWorld implements World {
         try {
           this.followEnabled();
           if (decl.name === 'feishu_status') {
-            this.rollDay();
+            this.store.rollDay();
             return {
               text: JSON.stringify({
                 connected: this.connected,
                 configured: Boolean(this.ctx.secret(FEISHU_SECRET_APP_ID)),
                 enabled: this.ctx.cfg.enabled,
-                today: { received: this.stats.received, replies: this.stats.replies },
+                today: { received: this.store.stats.received, replies: this.store.stats.replies },
                 phase: this.phase,
                 lastError: this.lastError,
               }),
             };
           }
           if (decl.name === 'feishu_reply') return await this.send(args);
-          if (decl.name === 'feishu_roster') return await this.roster(String(args.chatId ?? '').trim());
+          if (decl.name === 'feishu_roster') return await this.contacts.roster(String(args.chatId ?? '').trim());
           if (decl.name === 'feishu_setup') {
             const appId = String(args.appId ?? '').trim();
             const appSecret = String(args.appSecret ?? '').trim();
@@ -1367,8 +997,8 @@ export class FeishuWorld implements World {
         },
       ],
       badges: [
-        { label: '今日收', value: this.stats.received, tone: 'plain' },
-        { label: '今日回', value: this.stats.replies, tone: 'plain' },
+        { label: '今日收', value: this.store.stats.received, tone: 'plain' },
+        { label: '今日回', value: this.store.stats.replies, tone: 'plain' },
       ],
       panels: [
         { id: 'chat', title: '会话', description: '飞书收发的消息,一个窗口里看全。' },
@@ -1380,54 +1010,30 @@ export class FeishuWorld implements World {
           key: 'feishu-thread',
           label: '会话流水',
           kind: 'disk',
-          location: this.threadFile(),
+          location: this.store.threadFile(),
           danger: true,
           note: '清掉后「会话」面板就空了。',
-          stat: () => `${this.thread.length} 条`,
-          clear: () => {
-            this.thread = [];
-            try {
-              fs.rmSync(this.threadFile(), { force: true });
-            } catch {
-              // 文件本来就不在也算干净
-            }
-            return '会话流水已清空';
-          },
+          stat: () => `${this.store.thread.length} 条`,
+          clear: () => this.store.clearThread(),
         },
         {
           key: 'feishu-today',
           label: '今日收发计数',
           kind: 'disk',
-          location: this.statsFile(),
+          location: this.store.statsFile(),
           danger: true,
           note: '清掉会把今天已回条数归零,每日上限跟着重算。',
-          stat: () => `今日收 ${this.stats.received} · 回 ${this.stats.replies}`,
-          clear: () => {
-            this.stats = { day: '', replies: 0, received: 0 };
-            this.statsOk = true;
-            this.saveStats(true);
-            return '今日计数已归零';
-          },
+          stat: () => `今日收 ${this.store.stats.received} · 回 ${this.store.stats.replies}`,
+          clear: () => this.store.clearStats(),
         },
         {
           key: 'feishu-names',
           label: '认人缓存',
           kind: 'disk',
-          location: this.namesFile(),
+          location: this.contacts.namesFile(),
           note: 'open_id 换成名字和部门的缓存,清了下次会重新查通讯录。',
-          stat: () => `${this.names.size} 人`,
-          clear: () => {
-            this.names.clear();
-            this.depts.clear();
-            this.nameMiss.clear();
-            this.deptMiss.clear();
-            try {
-              fs.rmSync(this.namesFile(), { force: true });
-            } catch {
-              // 文件本来就不在也算干净
-            }
-            return '认人缓存已清空';
-          },
+          stat: () => `${this.contacts.names.size} 人`,
+          clear: () => this.contacts.clear(),
         },
       ],
       // 配置页签:声明了才会在页面上露出 worlds.feishu.* 那几项(含群聊开关)。
@@ -1452,7 +1058,7 @@ export class FeishuWorld implements World {
 
   envPromptVars() {
     this.followEnabled();
-    this.rollDay();
+    this.store.rollDay();
     const name = String(this.ctx.cfg.ownerName ?? '').trim();
     const extra = String(this.ctx.cfg.extraPrompt ?? '').trim();
     return {
@@ -1461,7 +1067,8 @@ export class FeishuWorld implements World {
         enabled: this.ctx.cfg.enabled,
         ownerOnly: Boolean(this.ctx.cfg.ownerOpenId),
         group: this.ctx.cfg.replyToGroup,
-        today: this.stats,
+        groupMentionOnly: Boolean(this.ctx.cfg.groupMentionOnly),
+        today: this.store.stats,
       }),
       // 没填称呼就退回「对方」,模板里两条路都说得通。
       'feishu.ownerName': name ? `「${name}」` : '对方',

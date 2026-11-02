@@ -10,6 +10,7 @@
       "im:message.group_msg",
       "im:message.p2p_msg:readonly",
       "im:message.reactions:read",
+      "im:message.reactions:write_only",
       "im:message:send_as_bot",
       "im:resource"
     ],
